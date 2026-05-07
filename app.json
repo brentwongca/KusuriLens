@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "KusuriLens",
+    "slug": "kusuri-lens",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.kusurilens.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "KusuriLens uses the camera to capture drugstore product photos for AI review.",
+        "NSPhotoLibraryUsageDescription": "KusuriLens uses your photo library so you can analyze saved product photos."
+      }
+    },
+    "android": {
+      "package": "com.kusurilens.app",
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "CAMERA",
+        "READ_MEDIA_IMAGES"
+      ]
+    },
+    "plugins": [
+      "expo-sqlite"
+    ]
+  }
+}

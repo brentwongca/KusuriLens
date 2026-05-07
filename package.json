@@ -1,0 +1,29 @@
+{
+  "name": "kusuri-lens",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "ai-server": "node server/index.js",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "hk-prices": "node scripts/fetch-hk-prices.js"
+  },
+  "dependencies": {
+    "@expo/vector-icons": "^15.0.3",
+    "expo": "~54.0.33",
+    "expo-image-picker": "~17.0.11",
+    "expo-sqlite": "~16.0.10",
+    "expo-status-bar": "~3.0.9",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-safe-area-context": "~5.6.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.0",
+    "typescript": "~5.9.2"
+  }
+}
