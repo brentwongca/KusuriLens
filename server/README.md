@@ -51,3 +51,6 @@ Do not expose the raw Node port directly to the internet. For a Raspberry Pi dep
 - Cloudflare Tunnel or a reverse proxy with HTTPS: set the app API base URL to `https://your-domain.example`.
 
 If you set `KUSURILENS_API_TOKEN`, the mobile app must send the same token from Settings -> Backend connection.
+
+For the full Raspberry Pi setup, including `systemd`, Tailscale, and tunnel options, see
+[`docs/raspberry-pi-backend-setup.md`](../docs/raspberry-pi-backend-setup.md).
