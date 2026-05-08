@@ -7,6 +7,7 @@ loadLocalEnv();
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
+const API_TOKEN = process.env.KUSURILENS_API_TOKEN || '';
 let activeAiProvider = normalizeAiProvider(process.env.AI_PROVIDER || 'gemini');
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'google/gemma-4-31b-it:free';
@@ -152,6 +153,11 @@ const server = http.createServer(async (request, response) => {
   if (request.method === 'OPTIONS') {
     response.writeHead(204);
     response.end();
+    return;
+  }
+
+  if (!isAuthorizedRequest(request)) {
+    sendJson(response, 401, { error: 'Unauthorized backend request.' });
     return;
   }
 
@@ -435,7 +441,16 @@ server.listen(PORT, HOST, () => {
 function setCorsHeaders(response) {
   response.setHeader('Access-Control-Allow-Origin', '*');
   response.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
-  response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+}
+
+function isAuthorizedRequest(request) {
+  if (!API_TOKEN) {
+    return true;
+  }
+
+  const authorization = request.headers.authorization || '';
+  return authorization === `Bearer ${API_TOKEN}`;
 }
 
 function sendJson(response, statusCode, payload) {

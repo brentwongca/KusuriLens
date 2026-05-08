@@ -26,13 +26,6 @@ type PriceEntryMode = 'manual' | 'authorized';
 type AddMode = 'gallery' | 'camera';
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
-const AI_JOBS_URL = 'http://127.0.0.1:8788/analysis-jobs';
-const API_USAGE_URL = 'http://127.0.0.1:8788/api-usage';
-const AI_PROVIDER_URL = 'http://127.0.0.1:8788/ai-provider';
-const AI_MODELS_URL = 'http://127.0.0.1:8788/ai-models';
-const LOGS_URL = 'http://127.0.0.1:8788/logs';
-const EXCHANGE_RATE_URL = 'http://127.0.0.1:8788/exchange-rate';
-const HK_PRICE_SOURCES_URL = 'http://127.0.0.1:8788/hk-price-sources';
 const DATABASE_NAME = 'kusurilens.db';
 
 type Trip = {
@@ -92,6 +85,11 @@ type TripSettings = {
   priceEntryMode: PriceEntryMode;
 };
 
+type BackendSettings = {
+  apiBaseUrl: string;
+  apiToken: string;
+};
+
 type AiProduct = {
   name?: string;
   brand?: string;
@@ -145,6 +143,7 @@ type AiAnalysisJobResponse = {
 
 type PendingAnalysis = {
   jobId: string;
+  backend: BackendSettings;
   imageUri?: string;
   trip: Trip;
   shop: JapanShop;
@@ -215,6 +214,17 @@ type HkSourceRow = HkSource & {
 
 type TableColumnRow = {
   name: string;
+};
+
+type AppSettingRow = {
+  key: string;
+  value: string;
+};
+
+const DEFAULT_API_BASE_URL = 'http://127.0.0.1:8787';
+const initialBackendSettings: BackendSettings = {
+  apiBaseUrl: DEFAULT_API_BASE_URL,
+  apiToken: '',
 };
 
 const initialSettings: TripSettings = {
@@ -343,6 +353,13 @@ async function createDatabaseSchema() {
     )
   `);
 
+  await schemaExec(database, `
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY NOT NULL,
+      value TEXT NOT NULL
+    )
+  `);
+
   return ensureProductColumns(database);
 }
 
@@ -455,6 +472,42 @@ async function loadProductRecords() {
       .filter((source) => source.availability !== 'Out of stock' && Boolean(source.url))
       .map(({ productId, ...source }) => source),
   }));
+}
+
+async function loadBackendSettings() {
+  const database = await initializeDatabase();
+
+  try {
+    const rows = await database.getAllAsync<AppSettingRow>(
+      "SELECT key, value FROM app_settings WHERE key IN ('apiBaseUrl', 'apiToken')",
+    );
+    const saved = Object.fromEntries(rows.map((row) => [row.key, row.value]));
+
+    return {
+      apiBaseUrl: normalizeApiBaseUrl(saved.apiBaseUrl || initialBackendSettings.apiBaseUrl),
+      apiToken: saved.apiToken || '',
+    };
+  } catch (error) {
+    if (isRecoverableSqliteStartupError(error)) {
+      return initialBackendSettings;
+    }
+
+    throw error;
+  }
+}
+
+async function saveBackendSettings(settings: BackendSettings) {
+  const database = await initializeDatabase();
+  await database.runAsync(
+    'INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)',
+    'apiBaseUrl',
+    normalizeApiBaseUrl(settings.apiBaseUrl),
+  );
+  await database.runAsync(
+    'INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)',
+    'apiToken',
+    settings.apiToken.trim(),
+  );
 }
 
 function isRecoverableSqliteStartupError(error: unknown) {
@@ -668,6 +721,26 @@ function normalizePrice(value: unknown) {
   return Number.isFinite(price) && price >= 0 ? price : 0;
 }
 
+function normalizeApiBaseUrl(value: string) {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return DEFAULT_API_BASE_URL;
+  }
+
+  return trimmed.replace(/\/+$/g, '');
+}
+
+function apiUrl(backend: BackendSettings, pathName: string) {
+  return `${normalizeApiBaseUrl(backend.apiBaseUrl)}${pathName}`;
+}
+
+function apiHeaders(backend: BackendSettings, headers: Record<string, string> = {}) {
+  const token = backend.apiToken.trim();
+
+  return token ? { ...headers, Authorization: `Bearer ${token}` } : headers;
+}
+
 function optionalPrice(value: unknown) {
   const price = normalizePrice(value);
   return price > 0 ? price : null;
@@ -682,12 +755,17 @@ function bestShelfPrice(product: AiProduct) {
   );
 }
 
-async function startProductPhotoAnalysis(imageBase64: string, shop: JapanShop, trip: Trip) {
-  const response = await fetch(AI_JOBS_URL, {
+async function startProductPhotoAnalysis(
+  backend: BackendSettings,
+  imageBase64: string,
+  shop: JapanShop,
+  trip: Trip,
+) {
+  const response = await fetch(apiUrl(backend, '/analysis-jobs'), {
     method: 'POST',
-    headers: {
+    headers: apiHeaders(backend, {
       'Content-Type': 'application/json',
-    },
+    }),
     body: JSON.stringify({
       imageBase64,
       shop: {
@@ -711,8 +789,10 @@ async function startProductPhotoAnalysis(imageBase64: string, shop: JapanShop, t
   return payload as AiAnalysisJobStartResponse;
 }
 
-async function getProductPhotoAnalysis(jobId: string) {
-  const response = await fetch(`${AI_JOBS_URL}/${encodeURIComponent(jobId)}`);
+async function getProductPhotoAnalysis(backend: BackendSettings, jobId: string) {
+  const response = await fetch(apiUrl(backend, `/analysis-jobs/${encodeURIComponent(jobId)}`), {
+    headers: apiHeaders(backend),
+  });
   const payload = await response.json();
 
   if (!response.ok) {
@@ -722,8 +802,10 @@ async function getProductPhotoAnalysis(jobId: string) {
   return payload as AiAnalysisJobResponse;
 }
 
-async function fetchJpyToHkdRate() {
-  const response = await fetch(EXCHANGE_RATE_URL);
+async function fetchJpyToHkdRate(backend: BackendSettings) {
+  const response = await fetch(apiUrl(backend, '/exchange-rate'), {
+    headers: apiHeaders(backend),
+  });
   const payload = await response.json();
 
   if (!response.ok) {
@@ -733,8 +815,10 @@ async function fetchJpyToHkdRate() {
   return payload as ExchangeRateResponse;
 }
 
-async function fetchApiUsage() {
-  const response = await fetch(API_USAGE_URL);
+async function fetchApiUsage(backend: BackendSettings) {
+  const response = await fetch(apiUrl(backend, '/api-usage'), {
+    headers: apiHeaders(backend),
+  });
   const payload = await response.json();
 
   if (!response.ok) {
@@ -744,8 +828,10 @@ async function fetchApiUsage() {
   return payload as ApiUsageResponse;
 }
 
-async function fetchAiProviderStatus() {
-  const response = await fetch(AI_PROVIDER_URL);
+async function fetchAiProviderStatus(backend: BackendSettings) {
+  const response = await fetch(apiUrl(backend, '/ai-provider'), {
+    headers: apiHeaders(backend),
+  });
   const payload = await response.json();
 
   if (!response.ok) {
@@ -755,12 +841,12 @@ async function fetchAiProviderStatus() {
   return payload as AiProviderStatus;
 }
 
-async function updateAiProvider(provider: AiProviderName) {
-  const response = await fetch(AI_PROVIDER_URL, {
+async function updateAiProvider(backend: BackendSettings, provider: AiProviderName) {
+  const response = await fetch(apiUrl(backend, '/ai-provider'), {
     method: 'POST',
-    headers: {
+    headers: apiHeaders(backend, {
       'Content-Type': 'application/json',
-    },
+    }),
     body: JSON.stringify({ provider }),
   });
   const payload = await response.json();
@@ -772,12 +858,12 @@ async function updateAiProvider(provider: AiProviderName) {
   return payload as AiProviderStatus;
 }
 
-async function addAiModel(provider: AiProviderName, model: string) {
-  const response = await fetch(AI_MODELS_URL, {
+async function addAiModel(backend: BackendSettings, provider: AiProviderName, model: string) {
+  const response = await fetch(apiUrl(backend, '/ai-models'), {
     method: 'POST',
-    headers: {
+    headers: apiHeaders(backend, {
       'Content-Type': 'application/json',
-    },
+    }),
     body: JSON.stringify({ provider, model }),
   });
   const payload = await response.json();
@@ -789,12 +875,12 @@ async function addAiModel(provider: AiProviderName, model: string) {
   return payload as AiProviderStatus;
 }
 
-async function selectAiModel(provider: AiProviderName, model: string) {
-  const response = await fetch(`${AI_MODELS_URL}/select`, {
+async function selectAiModel(backend: BackendSettings, provider: AiProviderName, model: string) {
+  const response = await fetch(apiUrl(backend, '/ai-models/select'), {
     method: 'POST',
-    headers: {
+    headers: apiHeaders(backend, {
       'Content-Type': 'application/json',
-    },
+    }),
     body: JSON.stringify({ provider, model }),
   });
   const payload = await response.json();
@@ -806,10 +892,13 @@ async function selectAiModel(provider: AiProviderName, model: string) {
   return payload as AiProviderStatus;
 }
 
-async function deleteAiModel(provider: AiProviderName, model: string) {
+async function deleteAiModel(backend: BackendSettings, provider: AiProviderName, model: string) {
   const response = await fetch(
-    `${AI_MODELS_URL}?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`,
-    { method: 'DELETE' },
+    apiUrl(
+      backend,
+      `/ai-models?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`,
+    ),
+    { method: 'DELETE', headers: apiHeaders(backend) },
   );
   const payload = await response.json();
 
@@ -820,8 +909,10 @@ async function deleteAiModel(provider: AiProviderName, model: string) {
   return payload as AiProviderStatus;
 }
 
-async function fetchServerLogs() {
-  const response = await fetch(`${LOGS_URL}?limit=24`);
+async function fetchServerLogs(backend: BackendSettings) {
+  const response = await fetch(apiUrl(backend, '/logs?limit=24'), {
+    headers: apiHeaders(backend),
+  });
   const payload = await response.json();
 
   if (!response.ok) {
@@ -831,8 +922,11 @@ async function fetchServerLogs() {
   return payload as ServerLogsResponse;
 }
 
-async function openServerLogFile() {
-  const response = await fetch(`${LOGS_URL}/open`, { method: 'POST' });
+async function openServerLogFile(backend: BackendSettings) {
+  const response = await fetch(apiUrl(backend, '/logs/open'), {
+    method: 'POST',
+    headers: apiHeaders(backend),
+  });
   const payload = await response.json();
 
   if (!response.ok) {
@@ -842,12 +936,12 @@ async function openServerLogFile() {
   return payload as { ok: boolean; path: string };
 }
 
-async function fetchHongKongPriceSources(product: ProductRecord) {
-  const response = await fetch(HK_PRICE_SOURCES_URL, {
+async function fetchHongKongPriceSources(backend: BackendSettings, product: ProductRecord) {
+  const response = await fetch(apiUrl(backend, '/hk-price-sources'), {
     method: 'POST',
-    headers: {
+    headers: apiHeaders(backend, {
       'Content-Type': 'application/json',
-    },
+    }),
     body: JSON.stringify({
       product: {
         name: product.name,
@@ -882,6 +976,7 @@ function KusuriLensApp() {
   const [trips] = useState(sampleTrips);
   const [shops] = useState(sampleShops);
   const [settings, setSettings] = useState(initialSettings);
+  const [backendSettings, setBackendSettings] = useState(initialBackendSettings);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedTripId, setSelectedTripId] = useState(sampleTrips[0].id);
   const [selectedShopId, setSelectedShopId] = useState(sampleShops[0].id);
@@ -913,17 +1008,21 @@ function KusuriLensApp() {
     async function loadDatabase() {
       try {
         await initializeDatabase();
-        const savedProducts = await loadProductRecords();
+        const [savedProducts, savedBackendSettings] = await Promise.all([
+          loadProductRecords(),
+          loadBackendSettings(),
+        ]);
 
         if (!mounted) {
           return;
         }
 
+        setBackendSettings(savedBackendSettings);
         setProducts(savedProducts);
         setSelectedId(savedProducts[0]?.id ?? null);
         setIsDatabaseReady(true);
-        refreshApiUsage();
-        refreshAiProviderStatus();
+        refreshApiUsage(savedBackendSettings);
+        refreshAiProviderStatus(savedBackendSettings);
       } catch (error) {
         setIsDatabaseReady(true);
         Alert.alert(
@@ -953,7 +1052,7 @@ function KusuriLensApp() {
 
     async function syncDefaultSourceRate() {
       try {
-        const nextRate = await fetchJpyToHkdRate();
+        const nextRate = await fetchJpyToHkdRate(backendSettings);
 
         setSettings((current) => ({
           ...current,
@@ -969,31 +1068,31 @@ function KusuriLensApp() {
     }
 
     syncDefaultSourceRate();
-  }, [settings.exchangeRateSource, settings.priceEntryMode]);
+  }, [backendSettings, settings.exchangeRateSource, settings.priceEntryMode]);
 
-  async function refreshApiUsage() {
+  async function refreshApiUsage(backend = backendSettings) {
     try {
-      const nextUsage = await fetchApiUsage();
+      const nextUsage = await fetchApiUsage(backend);
       setApiUsage(nextUsage);
     } catch {
       setApiUsage(null);
     }
   }
 
-  async function refreshAiProviderStatus() {
+  async function refreshAiProviderStatus(backend = backendSettings) {
     try {
-      const nextStatus = await fetchAiProviderStatus();
+      const nextStatus = await fetchAiProviderStatus(backend);
       setAiProviderStatus(nextStatus);
     } catch {
       setAiProviderStatus(null);
     }
   }
 
-  async function refreshServerLogs() {
+  async function refreshServerLogs(backend = backendSettings) {
     setIsRefreshingLogs(true);
 
     try {
-      setServerLogs(await fetchServerLogs());
+      setServerLogs(await fetchServerLogs(backend));
     } catch (error) {
       showAnalysisNotice(
         'error',
@@ -1006,7 +1105,7 @@ function KusuriLensApp() {
 
   async function openServerLogs() {
     try {
-      const result = await openServerLogFile();
+      const result = await openServerLogFile(backendSettings);
       showAnalysisNotice('info', `Opened log file: ${result.path}`);
     } catch (error) {
       showAnalysisNotice(
@@ -1024,7 +1123,7 @@ function KusuriLensApp() {
     setIsUpdatingAiProvider(true);
 
     try {
-      const nextStatus = await updateAiProvider(provider);
+      const nextStatus = await updateAiProvider(backendSettings, provider);
       setAiProviderStatus(nextStatus);
       await refreshApiUsage();
       showAnalysisNotice('info', `AI provider switched to ${provider}.`);
@@ -1064,21 +1163,21 @@ function KusuriLensApp() {
     }
 
     saveAiProviderStatus(
-      () => addAiModel(provider, trimmedModel),
+      () => addAiModel(backendSettings, provider, trimmedModel),
       `${provider === 'gemini' ? 'Gemini' : 'OpenRouter'} model added.`,
     );
   }
 
   function selectModelForProvider(provider: AiProviderName, model: string) {
     saveAiProviderStatus(
-      () => selectAiModel(provider, model),
+      () => selectAiModel(backendSettings, provider, model),
       `${provider === 'gemini' ? 'Gemini' : 'OpenRouter'} model selected.`,
     );
   }
 
   function deleteModelForProvider(provider: AiProviderName, model: string) {
     saveAiProviderStatus(
-      () => deleteAiModel(provider, model),
+      () => deleteAiModel(backendSettings, provider, model),
       `${provider === 'gemini' ? 'Gemini' : 'OpenRouter'} model deleted.`,
     );
   }
@@ -1099,7 +1198,7 @@ function KusuriLensApp() {
 
     async function pollAnalysis() {
       try {
-        const job = await getProductPhotoAnalysis(activeAnalysis.jobId);
+        const job = await getProductPhotoAnalysis(activeAnalysis.backend, activeAnalysis.jobId);
 
         if (cancelled || job.status === 'queued' || job.status === 'running') {
           if (!cancelled && job.stage) {
@@ -1361,7 +1460,7 @@ function KusuriLensApp() {
     setFetchingHkSourceId(product.id);
 
     try {
-      const lookup = await fetchHongKongPriceSources(product);
+      const lookup = await fetchHongKongPriceSources(backendSettings, product);
       const availableSources = lookup.sources.filter(
         (source) => source.availability !== 'Out of stock' && Boolean(source.url),
       );
@@ -1443,10 +1542,16 @@ function KusuriLensApp() {
     setIsAnalyzingPhoto(true);
 
     try {
-      const job = await startProductPhotoAnalysis(imageAsset.base64, selectedShop, selectedTrip);
+      const job = await startProductPhotoAnalysis(
+        backendSettings,
+        imageAsset.base64,
+        selectedShop,
+        selectedTrip,
+      );
 
       setPendingAnalysis({
         jobId: job.id,
+        backend: backendSettings,
         imageUri: imageAsset.uri,
         trip: selectedTrip,
         shop: selectedShop,
@@ -1528,6 +1633,7 @@ function KusuriLensApp() {
               isDatabaseReady={isDatabaseReady}
               settings={settings}
               setSettings={setSettings}
+              backendSettings={backendSettings}
               tripSummary={tripSummary}
               onSelectProduct={setSelectedId}
               onVerify={() => selectedProduct && verifyProduct(selectedProduct.id)}
@@ -1557,6 +1663,8 @@ function KusuriLensApp() {
             <SettingsScreen
               settings={settings}
               setSettings={setSettings}
+              backendSettings={backendSettings}
+              setBackendSettings={setBackendSettings}
               apiUsage={apiUsage}
               onRefreshApiUsage={refreshApiUsage}
               aiProviderStatus={aiProviderStatus}
@@ -1569,6 +1677,13 @@ function KusuriLensApp() {
               isRefreshingLogs={isRefreshingLogs}
               onRefreshLogs={refreshServerLogs}
               onOpenLogs={openServerLogs}
+              onBackendSaved={async (nextBackendSettings) => {
+                setApiUsage(null);
+                setAiProviderStatus(null);
+                setServerLogs(null);
+                await refreshAiProviderStatus(nextBackendSettings);
+                await refreshApiUsage(nextBackendSettings);
+              }}
             />
           )}
         </ScrollView>
@@ -2049,6 +2164,7 @@ function OverallScreen({
   isDatabaseReady,
   settings,
   setSettings,
+  backendSettings,
   tripSummary,
   onSelectProduct,
   onVerify,
@@ -2065,6 +2181,7 @@ function OverallScreen({
   isDatabaseReady: boolean;
   settings: TripSettings;
   setSettings: React.Dispatch<React.SetStateAction<TripSettings>>;
+  backendSettings: BackendSettings;
   tripSummary: { totalOriginalYen: number; totalComparisonHkd: number; needsReview: number };
   onSelectProduct: (id: string) => void;
   onVerify: () => void;
@@ -2083,7 +2200,12 @@ function OverallScreen({
         <MetricCard label="Compare total" value={formatHkd(tripSummary.totalComparisonHkd)} />
       </View>
 
-      <TripPriceSettings settings={settings} setSettings={setSettings} compact />
+      <TripPriceSettings
+        settings={settings}
+        setSettings={setSettings}
+        backendSettings={backendSettings}
+        compact
+      />
 
       <View style={styles.panel}>
         <View style={styles.sectionHeader}>
@@ -2336,6 +2458,8 @@ function ShopsScreen({
 function SettingsScreen({
   settings,
   setSettings,
+  backendSettings,
+  setBackendSettings,
   apiUsage,
   onRefreshApiUsage,
   aiProviderStatus,
@@ -2348,9 +2472,12 @@ function SettingsScreen({
   isRefreshingLogs,
   onRefreshLogs,
   onOpenLogs,
+  onBackendSaved,
 }: {
   settings: TripSettings;
   setSettings: React.Dispatch<React.SetStateAction<TripSettings>>;
+  backendSettings: BackendSettings;
+  setBackendSettings: React.Dispatch<React.SetStateAction<BackendSettings>>;
   apiUsage: ApiUsageResponse | null;
   onRefreshApiUsage: () => void;
   aiProviderStatus: AiProviderStatus | null;
@@ -2363,15 +2490,101 @@ function SettingsScreen({
   isRefreshingLogs: boolean;
   onRefreshLogs: () => void;
   onOpenLogs: () => void;
+  onBackendSaved: (backend: BackendSettings) => Promise<void>;
 }) {
   const [modelDrafts, setModelDrafts] = useState<Record<AiProviderName, string>>({
     gemini: '',
     openrouter: '',
   });
+  const [backendDraft, setBackendDraft] = useState(backendSettings);
+  const [isSavingBackend, setIsSavingBackend] = useState(false);
+
+  useEffect(() => {
+    setBackendDraft(backendSettings);
+  }, [backendSettings]);
+
+  async function saveBackendDraft() {
+    const nextBackendSettings = {
+      apiBaseUrl: normalizeApiBaseUrl(backendDraft.apiBaseUrl),
+      apiToken: backendDraft.apiToken.trim(),
+    };
+
+    setIsSavingBackend(true);
+
+    try {
+      await saveBackendSettings(nextBackendSettings);
+      setBackendSettings(nextBackendSettings);
+      setBackendDraft(nextBackendSettings);
+      await onBackendSaved(nextBackendSettings);
+    } catch (error) {
+      Alert.alert(
+        'Backend settings unavailable',
+        error instanceof Error ? error.message : 'Could not save backend settings.',
+      );
+    } finally {
+      setIsSavingBackend(false);
+    }
+  }
 
   return (
     <>
-      <TripPriceSettings settings={settings} setSettings={setSettings} />
+      <TripPriceSettings
+        settings={settings}
+        setSettings={setSettings}
+        backendSettings={backendSettings}
+      />
+      <View style={styles.panel}>
+        <Text style={styles.sectionTitle}>Backend connection</Text>
+        <Text style={styles.bodyCopy}>
+          Use your local address for development, or your Pi VPN/tunnel HTTPS URL when you are outside.
+        </Text>
+        <View style={styles.backendForm}>
+          <Text style={styles.inputLabel}>API base URL</Text>
+          <TextInput
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+            placeholder={DEFAULT_API_BASE_URL}
+            value={backendDraft.apiBaseUrl}
+            onChangeText={(apiBaseUrl) =>
+              setBackendDraft((current) => ({ ...current, apiBaseUrl }))
+            }
+            style={styles.input}
+          />
+          <Text style={styles.inputLabel}>Access token</Text>
+          <TextInput
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="Optional, matches KUSURILENS_API_TOKEN"
+            secureTextEntry
+            value={backendDraft.apiToken}
+            onChangeText={(apiToken) =>
+              setBackendDraft((current) => ({ ...current, apiToken }))
+            }
+            style={styles.input}
+          />
+          <View style={styles.backendActions}>
+            <Pressable
+              style={styles.secondaryButton}
+              onPress={() => setBackendDraft(initialBackendSettings)}
+              disabled={isSavingBackend}
+            >
+              <Text style={styles.secondaryButtonText}>Dev default</Text>
+            </Pressable>
+            <Pressable
+              style={styles.verifyButton}
+              onPress={saveBackendDraft}
+              disabled={isSavingBackend}
+            >
+              {isSavingBackend ? (
+                <ActivityIndicator color="#FFFFFF" />
+              ) : (
+                <Text style={styles.verifyButtonText}>Save and test</Text>
+              )}
+            </Pressable>
+          </View>
+        </View>
+      </View>
       <View style={styles.panel}>
         <Text style={styles.sectionTitle}>AI provider</Text>
         <View style={styles.providerSegmented}>
@@ -2590,10 +2803,12 @@ function SettingsScreen({
 function TripPriceSettings({
   settings,
   setSettings,
+  backendSettings,
   compact = false,
 }: {
   settings: TripSettings;
   setSettings?: React.Dispatch<React.SetStateAction<TripSettings>>;
+  backendSettings: BackendSettings;
   compact?: boolean;
 }) {
   const canEdit = settings.priceEntryMode === 'manual' && Boolean(setSettings);
@@ -2619,7 +2834,7 @@ function TripPriceSettings({
     setIsSyncingRate(true);
 
     try {
-      const nextRate = await fetchJpyToHkdRate();
+      const nextRate = await fetchJpyToHkdRate(backendSettings);
       updateSettings({
         exchangeRate: nextRate.rate,
         exchangeRateSource: nextRate.source,
@@ -3418,6 +3633,15 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 10,
     marginTop: 14,
+  },
+  backendForm: {
+    gap: 8,
+    marginTop: 14,
+  },
+  backendActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 8,
   },
   logActions: {
     flexDirection: 'row',
